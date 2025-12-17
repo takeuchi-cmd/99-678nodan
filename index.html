@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>6・7・8の段 九九チャレンジ</title>
+    <!-- Tailwind CSS (デザイン用) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- アイコン -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body { font-family: 'Verdana', sans-serif; touch-action: manipulation; }
+        .btn-press { transition: transform 0.1s; }
+        .btn-press:active { transform: scale(0.95); }
+        .fade-in { animation: fadeIn 0.5s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        /* 紙吹雪アニメーション */
+        .confetti { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 50; display: none; }
+        .confetti-piece { position: absolute; width: 10px; height: 10px; background: #ffd700; top: -10px; opacity: 0; }
+        @keyframes fall {
+            0% { top: -10%; transform: translateX(0) rotate(0deg); opacity: 1; }
+            100% { top: 110%; transform: translateX(100px) rotate(360deg); opacity: 0; }
+        }
+    </style>
+</head>
+<body class="bg-blue-50 text-gray-800 min-h-screen flex flex-col items-center justify-center p-4">
+
+    <!-- アプリケーションコンテナ -->
+    <div id="app" class="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden relative min-h-[500px] flex flex-col">
+        
+        <!-- ヘッダー -->
+        <div class="bg-indigo-600 p-4 text-white text-center">
+            <h1 class="text-xl font-bold"><i class="fas fa-shapes mr-2"></i>6・7・8の段 チャレンジ</h1>
+        </div>
+
+        <!-- メインコンテンツエリア -->
+        <div id="content" class="flex-1 p-6 flex flex-col items-center justify-center relative">
+            <!-- JavaScriptでここに画面を描画します -->
+            <div class="animate-pulse text-indigo-500">読み込み中...</div>
+        </div>
+
+        <!-- フッター -->
+        <div class="bg-gray-100 p-2 text-center text-xs text-gray-500">
+            Powered by Firebase
+        </div>
+
+        <!-- 紙吹雪用コンテナ -->
+        <div id="confetti-container" class="confetti"></div>
+    </div>
+
+    <!-- Firebase SDK (CDN Module形式) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+        import { getFirestore, collection, addDoc, getDocs, query, Timestamp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        // ==========================================
+        // --- Firebase設定（ここを書き換えてください） ---
+        // Firebaseコンソールの「プロジェクトの設定」>「マイアプリ」からコピーしてください
+        // ==========================================
+        const firebaseConfig = {
+  apiKey: "AIzaSyATwDH_QmfcO4J1sGLaFCAe9lZ6dCuFW44",
+  authDomain: "nodan-d4c56.firebaseapp.com",
+  projectId: "nodan-d4c56",
+  storageBucket: "nodan-d4c56.firebasestorage.app",
+  messagingSenderId: "662440516870",
+  appId: "1:662440516870:web:2c34ca5500aad21a955287",
+  measurementId: "G-DP984V1305"
+};
+        // ==========================================
+
+        // アプリの初期化
+        let app, auth, db, currentUser;
+        
+        // 開発環境用のフォールバック（Canvas環境などconfigが空の場合のエラー回避）
+        try {
+            if (firebaseConfig.apiKey === "YOUR_API_KEY") {
+                console.warn("Firebase設定がデフォルトのままです。正しく動作しません。");
+                // デモ用にローカルストレージのみで動くモードにするか、アラートを出すなどの処理
+                document.getElementById('content').innerHTML = `
+                    <div class="text-red-500 text-center">
+                        <p class="font-bold mb-2">設定が必要です</p>
+                        <p class="text-sm">index.html内のfirebaseConfigを<br>書き換えてください。</p>
+                    </div>`;
+            } else {
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+                
+                // 匿名ログイン
+                signInAnonymously(auth).catch((error) => {
+                    console.error("Auth Error:", error);
+                    alert("ログインエラーが発生しました。");
+                });
+            }
+        } catch (e) {
+            console.error("Init Error:", e);
+        }
+
+        // --- アプリの状態管理 ---
+        const state = {
+            screen: 'loading', // loading, login, home, game, result
+            handleName: localStorage.getItem('kuku_handleName') || '',
+            questions: [],
+            currentQuestionIndex: 0,
+            startTime: 0,
+            endTime: 0,
+            correctCount: 0,
+            personalBest: null, // { time: number, date: string }
+            dailyHighScores: []
+        };
+
+        // --- DOM要素 ---
+        const contentDiv = document.getElementById('content');
+        const confettiDiv = document.getElementById('confetti-container');
+
+        // --- 認証状態の監視 ---
+        if (auth) {
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    currentUser = user;
+                    // 名前がなければログイン画面へ、あればホームへ
+                    if (!state.handleName) {
+                        changeScreen('login');
+                    } else {
+                        await loadRecords();
+                        changeScreen('home');
+                    }
+                }
+            });
+        }
+
+        // --- 画面遷移管理 ---
+        async function changeScreen(screenName) {
+            state.screen = screenName;
+            contentDiv.innerHTML = ''; // 画面クリア
+            contentDiv.className = "flex-1 p-6 flex flex-col items-center justify-center relative fade-in";
+
+            switch (screenName) {
+                case 'login':
+                    renderLogin();
+                    break;
+                case 'home':
+                    renderHome();
+                    break;
+                case 'game':
+                    renderGame();
+                    break;
+                case 'result':
+                    renderResult();
+                    break;
+            }
+        }
+
+        // --- 1. ログイン（ハンドルネーム登録）画面 ---
+        function renderLogin() {
+            contentDiv.innerHTML = `
+                <div class="text-center w-full">
+                    <h2 class="text-xl font-bold mb-6 text-indigo-700">お名前をおしえてね</h2>
+                    <input type="text" id="handleNameInput" placeholder="ニックネーム" maxlength="10"
+                        class="w-full p-4 border-2 border-indigo-200 rounded-xl text-center text-xl mb-4 focus:outline-none focus:border-indigo-500">
+                    <button id="saveNameBtn" class="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-3 px-6 rounded-xl shadow-md btn-press">
+                        はじめる
+                    </button>
+                </div>
+            `;
+            
+            document.getElementById('saveNameBtn').onclick = async () => {
+                const name = document.getElementById('handleNameInput').value.trim();
+                if (name) {
+                    state.handleName = name;
+                    localStorage.setItem('kuku_handleName', name);
+                    await loadRecords();
+                    changeScreen('home');
+                }
+            };
+        }
+
+        // --- 2. ホーム画面（ランキング表示） ---
+        function renderHome() {
+            // 個人の自己ベスト表示整形
+            let bestText = '<span class="text-gray-400">-</span>';
+            if (state.personalBest) {
+                bestText = `<span class="text-amber-500 font-bold">${(state.personalBest.time / 1000).toFixed(1)}秒</span>`;
+            }
+
+            // 今日のランキング生成
+            const rankingHtml = state.dailyHighScores.length > 0 
+                ? state.dailyHighScores.map((s, i) => `
+                    <div class="flex justify-between items-center text-sm border-b border-gray-100 py-2">
+                        <span class="font-bold w-6 text-indigo-400">${i + 1}.</span>
+                        <span class="flex-1 truncate text-gray-700">${s.handleName}</span>
+                        <span class="font-bold text-gray-600">${(s.timeTaken / 1000).toFixed(1)}秒</span>
+                    </div>
+                `).join('')
+                : '<div class="text-center text-gray-400 text-sm py-4">まだ記録がありません。<br>一番乗りを目指そう！</div>';
+
+            contentDiv.innerHTML = `
+                <div class="w-full max-w-sm">
+                    <div class="bg-indigo-50 rounded-xl p-4 mb-6 shadow-inner">
+                        <p class="text-sm text-gray-500 mb-1 text-center">こんにちは、<span class="font-bold text-indigo-600">${state.handleName}</span>さん</p>
+                        <div class="flex justify-between items-center bg-white p-3 rounded-lg border border-indigo-100">
+                            <span class="text-xs font-bold text-gray-500">自己ベスト</span>
+                            <span class="text-xl">${bestText}</span>
+                        </div>
+                    </div>
+
+                    <div class="mb-6">
+                        <h3 class="text-sm font-bold text-gray-500 mb-2 pl-2"><i class="fas fa-trophy text-yellow-400 mr-1"></i>今日のランキング (TOP 5)</h3>
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-2 min-h-[150px]">
+                            ${rankingHtml}
+                        </div>
+                    </div>
+
+                    <button id="startBtn" class="w-full bg-gradient-to-r from-pink-500 to-rose-500 text-white text-xl font-bold py-4 px-6 rounded-2xl shadow-lg btn-press transform hover:-translate-y-1 transition-all">
+                        <i class="fas fa-play mr-2"></i>スタート！
+                    </button>
+                    
+                    <button id="changeNameBtn" class="mt-4 text-xs text-gray-400 underline w-full text-center">
+                        名前を変える
+                    </button>
+                </div>
+            `;
+
+            document.getElementById('startBtn').onclick = startGame;
+            document.getElementById('changeNameBtn').onclick = () => {
+                localStorage.removeItem('kuku_handleName');
+                state.handleName = '';
+                changeScreen('login');
+            };
+        }
+
+        // --- 3. ゲーム画面 ---
+        function startGame() {
+            // 問題生成（6,7,8の段）
+            const targets = [6, 7, 8];
+            const allQuestions = [];
+            targets.forEach(t => {
+                for (let i = 1; i <= 9; i++) {
+                    allQuestions.push({ q: `${t} × ${i}`, a: t * i });
+                }
+            });
+
+            // シャッフルして5問抽出
+            state.questions = allQuestions
+                .sort(() => Math.random() - 0.5)
+                .slice(0, 5);
+            
+            state.currentQuestionIndex = 0;
+            state.correctCount = 0;
+            state.startTime = Date.now();
+            changeScreen('game');
+        }
+
+        function renderGame() {
+            const question = state.questions[state.currentQuestionIndex];
+            
+            contentDiv.innerHTML = `
+                <div class="w-full h-full flex flex-col justify-between">
+                    <div class="flex justify-between text-gray-400 text-sm mb-4">
+                        <span>第 ${state.currentQuestionIndex + 1} / 5 問</span>
+                        <span id="timer">0.0秒</span>
+                    </div>
+
+                    <div class="flex-1 flex flex-col items-center justify-center mb-8">
+                        <div class="text-6xl font-bold text-indigo-800 mb-8 tracking-wider font-mono">
+                            ${question.q}
+                        </div>
+                        <div id="answerDisplay" class="h-16 text-4xl font-bold text-gray-600 border-b-4 border-indigo-200 w-32 text-center">
+                            ?
+                        </div>
+                    </div>
+
+                    <!-- テンキー -->
+                    <div class="grid grid-cols-3 gap-2 w-full max-w-xs mx-auto">
+                        ${[7,8,9,4,5,6,1,2,3,0].map(n => `
+                            <button class="num-key bg-white border border-gray-200 rounded-lg py-4 text-xl font-bold shadow-sm active:bg-indigo-50 btn-press" data-num="${n}">${n}</button>
+                        `).join('')}
+                        <button class="col-span-2 bg-gray-200 rounded-lg py-4 text-gray-600 font-bold btn-press" id="clearBtn">けす</button>
+                    </div>
+                </div>
+            `;
+
+            let currentInput = "";
+            let timerInterval = setInterval(() => {
+                const elapsed = (Date.now() - state.startTime) / 1000;
+                const timerEl = document.getElementById('timer');
+                if(timerEl) timerEl.innerText = elapsed.toFixed(1) + "秒";
+            }, 100);
+
+            // テンキー入力処理
+            document.querySelectorAll('.num-key').forEach(btn => {
+                btn.onclick = () => {
+                    const num = btn.dataset.num;
+                    if (currentInput.length < 3) {
+                        currentInput += num;
+                        updateDisplay();
+                        checkAnswer();
+                    }
+                };
+            });
+
+            document.getElementById('clearBtn').onclick = () => {
+                currentInput = "";
+                updateDisplay();
+            };
+
+            function updateDisplay() {
+                const display = document.getElementById('answerDisplay');
+                display.innerText = currentInput || "?";
+                display.classList.remove('text-gray-600');
+                display.classList.add('text-indigo-600');
+            }
+
+            function checkAnswer() {
+                const val = parseInt(currentInput);
+                if (val === question.a) {
+                    // 正解
+                    clearInterval(timerInterval);
+                    state.correctCount++;
+                    document.getElementById('answerDisplay').classList.add('text-green-500');
+                    
+                    setTimeout(() => {
+                        nextQuestion();
+                    }, 300); // 少し待って次へ
+                } else if (currentInput.length >= String(question.a).length) {
+                    // 桁数が達して間違っている場合（即時判定はせず、ユーザーが消すのを待つならここは何もしない。今回は簡易UXのため、間違ってたら赤くしてリセット）
+                    const display = document.getElementById('answerDisplay');
+                    display.classList.add('text-red-500');
+                    setTimeout(() => {
+                        currentInput = "";
+                        updateDisplay();
+                        display.classList.remove('text-red-500');
+                    }, 500);
+                }
+            }
+
+            function nextQuestion() {
+                state.currentQuestionIndex++;
+                if (state.currentQuestionIndex >= 5) {
+                    state.endTime = Date.now();
+                    finishGame();
+                } else {
+                    clearInterval(timerInterval); // 前のタイマーを消す
+                    renderGame(); // 再描画
+                }
+            }
+        }
+
+        async function finishGame() {
+            const timeTaken = state.endTime - state.startTime;
+            const isFullCombo = state.correctCount === 5;
+            let isNewRecord = false;
+
+            // 全問正解ならデータベースに保存
+            if (isFullCombo && auth && currentUser) {
+                // 自己ベスト更新判定
+                if (!state.personalBest || timeTaken < state.personalBest.time) {
+                    isNewRecord = true;
+                }
+
+                try {
+                    // データ保存 (collection: scores)
+                    // ルール: artifacts/{appId}/public/data/scores
+                    const todayStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+                    const scoreData = {
+                        uid: currentUser.uid,
+                        handleName: state.handleName,
+                        score: state.correctCount,
+                        timeTaken: timeTaken,
+                        dateString: todayStr,
+                        createdAt: Timestamp.now()
+                    };
+
+                    await addDoc(collection(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'scores'), scoreData);
+                    
+                    // 記録を再読み込み
+                    await loadRecords();
+
+                } catch (e) {
+                    console.error("Save Error", e);
+                }
+            }
+
+            state.lastResult = { timeTaken, isFullCombo, isNewRecord };
+            changeScreen('result');
+        }
+
+        // --- 4. 結果画面 ---
+        function renderResult() {
+            const { timeTaken, isFullCombo, isNewRecord } = state.lastResult;
+            const timeSec = (timeTaken / 1000).toFixed(1);
+
+            let message = "";
+            let colorClass = "text-gray-700";
+            
+            if (isFullCombo) {
+                if (isNewRecord) {
+                    message = "🎉 新記録おめでとう！ 🎉";
+                    colorClass = "text-pink-600 animate-bounce";
+                    startConfetti();
+                } else {
+                    message = "全問正解！すごい！";
+                    colorClass = "text-orange-500";
+                }
+            } else {
+                message = "おしい！全部とけるかな？";
+                colorClass = "text-blue-500";
+            }
+
+            contentDiv.innerHTML = `
+                <div class="text-center w-full">
+                    <div class="mb-8">
+                        <h2 class="text-2xl font-bold ${colorClass} mb-2">${message}</h2>
+                        <div class="text-6xl font-bold text-indigo-900 font-mono my-6">
+                            ${timeSec}<span class="text-2xl ml-2 text-gray-500">秒</span>
+                        </div>
+                        <div class="flex justify-center space-x-4 text-sm text-gray-500">
+                            <div>正解数: <span class="font-bold text-gray-800">${state.correctCount}</span>/5</div>
+                        </div>
+                    </div>
+
+                    ${isNewRecord ? `<div class="bg-yellow-100 border-2 border-yellow-300 text-yellow-800 p-3 rounded-lg mb-6 font-bold text-sm">
+                        <i class="fas fa-crown mr-1"></i> 今日の自己ベスト更新！
+                    </div>` : ''}
+
+                    <button id="retryBtn" class="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-3 px-6 rounded-xl shadow-md btn-press mb-4">
+                        もう一回やる
+                    </button>
+                    <button id="homeBtn" class="w-full bg-white border-2 border-indigo-100 text-indigo-500 font-bold py-3 px-6 rounded-xl btn-press">
+                        ホームに戻る
+                    </button>
+                </div>
+            `;
+
+            document.getElementById('retryBtn').onclick = () => {
+                stopConfetti();
+                startGame();
+            };
+            document.getElementById('homeBtn').onclick = () => {
+                stopConfetti();
+                changeScreen('home');
+            };
+        }
+
+        // --- データ取得ロジック ---
+        // 複雑なクエリ（orderBy, whereの複合）を避けるため、クライアントサイドでフィルタリングします
+        async function loadRecords() {
+            if (!db) return;
+
+            const todayStr = new Date().toISOString().split('T')[0];
+            const scoresRef = collection(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'scores');
+            
+            try {
+                // シンプルに全データを取得 (本番アプリではデータ量に注意が必要ですが、学習用アプリの規模なら許容範囲)
+                // ※本来は composite index を作って query(scoresRef, where('dateString', '==', todayStr)) すべきですが
+                // index作成の手間を省くため全件取得してJSでフィルタします。
+                const snapshot = await getDocs(scoresRef);
+                const allScores = [];
+                
+                snapshot.forEach(doc => {
+                    allScores.push(doc.data());
+                });
+
+                // 1. 今日のデータのみ抽出
+                const todaysData = allScores.filter(d => d.dateString === todayStr && d.score === 5); // 5問正解のみ
+
+                // 2. 自己ベスト算出
+                const myRecords = allScores.filter(d => d.uid === currentUser.uid && d.score === 5);
+                if (myRecords.length > 0) {
+                    // 時間が短い順
+                    myRecords.sort((a, b) => a.timeTaken - b.timeTaken);
+                    state.personalBest = { time: myRecords[0].timeTaken };
+                } else {
+                    state.personalBest = null;
+                }
+
+                // 3. ランキング作成（時間が短い順）
+                todaysData.sort((a, b) => a.timeTaken - b.timeTaken);
+                
+                // 重複ユーザー除去（ユーザーごとのベストのみ残す）
+                const uniqueRanking = [];
+                const seenUsers = new Set();
+                for (const rec of todaysData) {
+                    if (!seenUsers.has(rec.uid)) {
+                        seenUsers.add(rec.uid);
+                        uniqueRanking.push(rec);
+                    }
+                    if (uniqueRanking.length >= 5) break;
+                }
+                
+                state.dailyHighScores = uniqueRanking;
+
+            } catch (e) {
+                console.error("Load Error:", e);
+            }
+        }
+
+        // --- 紙吹雪エフェクト (簡易CSS実装) ---
+        function startConfetti() {
+            confettiDiv.style.display = 'block';
+            confettiDiv.innerHTML = '';
+            const colors = ['#EF4444', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6'];
+            
+            for (let i = 0; i < 50; i++) {
+                const piece = document.createElement('div');
+                piece.className = 'confetti-piece';
+                piece.style.left = Math.random() * 100 + '%';
+                piece.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
+                piece.style.animation = `fall ${Math.random() * 3 + 2}s linear infinite`;
+                piece.style.animationDelay = Math.random() * 2 + 's';
+                confettiDiv.appendChild(piece);
+            }
+        }
+
+        function stopConfetti() {
+            confettiDiv.style.display = 'none';
+            confettiDiv.innerHTML = '';
+        }
+
+    </script>
+</body>
+</html>
