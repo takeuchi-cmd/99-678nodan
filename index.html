@@ -72,11 +72,10 @@
         // アプリの初期化
         let app, auth, db, currentUser;
         
-        // 開発環境用のフォールバック（Canvas環境などconfigが空の場合のエラー回避）
+        // 開発環境用のフォールバック
         try {
             if (firebaseConfig.apiKey === "YOUR_API_KEY") {
                 console.warn("Firebase設定がデフォルトのままです。正しく動作しません。");
-                // デモ用にローカルストレージのみで動くモードにするか、アラートを出すなどの処理
                 document.getElementById('content').innerHTML = `
                     <div class="text-red-500 text-center">
                         <p class="font-bold mb-2">設定が必要です</p>
@@ -87,10 +86,10 @@
                 auth = getAuth(app);
                 db = getFirestore(app);
                 
-                // 匿名ログイン
                 signInAnonymously(auth).catch((error) => {
                     console.error("Auth Error:", error);
-                    alert("ログインエラーが発生しました。");
+                    // エラーでもアプリ自体は動くようにアラートだけ出す
+                    // alert("ログインエラー: ネットワーク接続を確認してください");
                 });
             }
         } catch (e) {
@@ -99,60 +98,59 @@
 
         // --- アプリの状態管理 ---
         const state = {
-            screen: 'loading', // loading, login, home, game, result
+            screen: 'loading',
             handleName: localStorage.getItem('kuku_handleName') || '',
             questions: [],
             currentQuestionIndex: 0,
             startTime: 0,
             endTime: 0,
             correctCount: 0,
-            personalBest: null, // { time: number, date: string }
-            dailyHighScores: []
+            personalBest: null,
+            dailyHighScores: [],
+            lastResult: null,
+            isProcessing: false // 連打防止用
         };
 
-        // --- DOM要素 ---
         const contentDiv = document.getElementById('content');
         const confettiDiv = document.getElementById('confetti-container');
 
-        // --- 認証状態の監視 ---
         if (auth) {
             onAuthStateChanged(auth, async (user) => {
                 if (user) {
                     currentUser = user;
-                    // 名前がなければログイン画面へ、あればホームへ
                     if (!state.handleName) {
                         changeScreen('login');
                     } else {
-                        await loadRecords();
+                        await loadRecordsWithTimeout();
                         changeScreen('home');
                     }
                 }
             });
         }
 
-        // --- 画面遷移管理 ---
         async function changeScreen(screenName) {
             state.screen = screenName;
-            contentDiv.innerHTML = ''; // 画面クリア
+            contentDiv.innerHTML = '';
             contentDiv.className = "flex-1 p-6 flex flex-col items-center justify-center relative fade-in";
 
             switch (screenName) {
-                case 'login':
-                    renderLogin();
-                    break;
-                case 'home':
-                    renderHome();
-                    break;
-                case 'game':
-                    renderGame();
-                    break;
-                case 'result':
-                    renderResult();
-                    break;
+                case 'login': renderLogin(); break;
+                case 'home': renderHome(); break;
+                case 'game': renderGame(); break;
+                case 'processing': renderProcessing(); break; // 追加：処理中画面
+                case 'result': renderResult(); break;
             }
         }
 
-        // --- 1. ログイン（ハンドルネーム登録）画面 ---
+        function renderProcessing() {
+            contentDiv.innerHTML = `
+                <div class="text-center text-indigo-600">
+                    <i class="fas fa-spinner fa-spin text-4xl mb-4"></i>
+                    <p class="font-bold">結果を集計しています...</p>
+                </div>
+            `;
+        }
+
         function renderLogin() {
             contentDiv.innerHTML = `
                 <div class="text-center w-full">
@@ -170,21 +168,19 @@
                 if (name) {
                     state.handleName = name;
                     localStorage.setItem('kuku_handleName', name);
-                    await loadRecords();
+                    changeScreen('processing');
+                    await loadRecordsWithTimeout();
                     changeScreen('home');
                 }
             };
         }
 
-        // --- 2. ホーム画面（ランキング表示） ---
         function renderHome() {
-            // 個人の自己ベスト表示整形
             let bestText = '<span class="text-gray-400">-</span>';
             if (state.personalBest) {
                 bestText = `<span class="text-amber-500 font-bold">${(state.personalBest.time / 1000).toFixed(1)}秒</span>`;
             }
 
-            // 今日のランキング生成
             const rankingHtml = state.dailyHighScores.length > 0 
                 ? state.dailyHighScores.map((s, i) => `
                     <div class="flex justify-between items-center text-sm border-b border-gray-100 py-2">
@@ -230,9 +226,7 @@
             };
         }
 
-        // --- 3. ゲーム画面 ---
         function startGame() {
-            // 問題生成（6,7,8の段）
             const targets = [6, 7, 8];
             const allQuestions = [];
             targets.forEach(t => {
@@ -241,19 +235,17 @@
                 }
             });
 
-            // シャッフルして5問抽出
-            state.questions = allQuestions
-                .sort(() => Math.random() - 0.5)
-                .slice(0, 5);
-            
+            state.questions = allQuestions.sort(() => Math.random() - 0.5).slice(0, 5);
             state.currentQuestionIndex = 0;
             state.correctCount = 0;
+            state.isProcessing = false;
             state.startTime = Date.now();
             changeScreen('game');
         }
 
         function renderGame() {
             const question = state.questions[state.currentQuestionIndex];
+            state.isProcessing = false; // 入力可能状態にする
             
             contentDiv.innerHTML = `
                 <div class="w-full h-full flex flex-col justify-between">
@@ -271,7 +263,6 @@
                         </div>
                     </div>
 
-                    <!-- テンキー -->
                     <div class="grid grid-cols-3 gap-2 w-full max-w-xs mx-auto">
                         ${[7,8,9,4,5,6,1,2,3,0].map(n => `
                             <button class="num-key bg-white border border-gray-200 rounded-lg py-4 text-xl font-bold shadow-sm active:bg-indigo-50 btn-press" data-num="${n}">${n}</button>
@@ -282,15 +273,20 @@
             `;
 
             let currentInput = "";
-            let timerInterval = setInterval(() => {
+            
+            // 既存のインターバルをクリアしてから新しく設定
+            if (window.gameTimer) clearInterval(window.gameTimer);
+            
+            window.gameTimer = setInterval(() => {
                 const elapsed = (Date.now() - state.startTime) / 1000;
                 const timerEl = document.getElementById('timer');
                 if(timerEl) timerEl.innerText = elapsed.toFixed(1) + "秒";
             }, 100);
 
-            // テンキー入力処理
             document.querySelectorAll('.num-key').forEach(btn => {
                 btn.onclick = () => {
+                    if (state.isProcessing) return; // 処理中は入力無視
+
                     const num = btn.dataset.num;
                     if (currentInput.length < 3) {
                         currentInput += num;
@@ -301,6 +297,7 @@
             });
 
             document.getElementById('clearBtn').onclick = () => {
+                if (state.isProcessing) return;
                 currentInput = "";
                 updateDisplay();
             };
@@ -315,18 +312,18 @@
             function checkAnswer() {
                 const val = parseInt(currentInput);
                 if (val === question.a) {
-                    // 正解
-                    clearInterval(timerInterval);
+                    state.isProcessing = true; // 連打防止
+                    clearInterval(window.gameTimer);
                     state.correctCount++;
                     document.getElementById('answerDisplay').classList.add('text-green-500');
                     
                     setTimeout(() => {
                         nextQuestion();
-                    }, 300); // 少し待って次へ
+                    }, 300);
                 } else if (currentInput.length >= String(question.a).length) {
-                    // 桁数が達して間違っている場合（即時判定はせず、ユーザーが消すのを待つならここは何もしない。今回は簡易UXのため、間違ってたら赤くしてリセット）
                     const display = document.getElementById('answerDisplay');
                     display.classList.add('text-red-500');
+                    // 間違いは即リセットして入力継続させる
                     setTimeout(() => {
                         currentInput = "";
                         updateDisplay();
@@ -341,44 +338,48 @@
                     state.endTime = Date.now();
                     finishGame();
                 } else {
-                    clearInterval(timerInterval); // 前のタイマーを消す
-                    renderGame(); // 再描画
+                    renderGame();
                 }
             }
         }
 
         async function finishGame() {
+            changeScreen('processing'); // まず処理中画面へ
+
             const timeTaken = state.endTime - state.startTime;
             const isFullCombo = state.correctCount === 5;
             let isNewRecord = false;
 
-            // 全問正解ならデータベースに保存
+            // タイムアウト付きで保存処理を行う
             if (isFullCombo && auth && currentUser) {
-                // 自己ベスト更新判定
                 if (!state.personalBest || timeTaken < state.personalBest.time) {
                     isNewRecord = true;
                 }
 
                 try {
-                    // データ保存 (collection: scores)
-                    // ルール: artifacts/{appId}/public/data/scores
-                    const todayStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-                    const scoreData = {
-                        uid: currentUser.uid,
-                        handleName: state.handleName,
-                        score: state.correctCount,
-                        timeTaken: timeTaken,
-                        dateString: todayStr,
-                        createdAt: Timestamp.now()
-                    };
+                    // 3秒でタイムアウトさせるPromise
+                    const timeoutPromise = new Promise((_, reject) => 
+                        setTimeout(() => reject(new Error('Timeout')), 3000)
+                    );
 
-                    await addDoc(collection(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'scores'), scoreData);
-                    
-                    // 記録を再読み込み
-                    await loadRecords();
+                    const savePromise = (async () => {
+                        const todayStr = new Date().toISOString().split('T')[0];
+                        const scoreData = {
+                            uid: currentUser.uid,
+                            handleName: state.handleName,
+                            score: state.correctCount,
+                            timeTaken: timeTaken,
+                            dateString: todayStr,
+                            createdAt: Timestamp.now()
+                        };
+                        await addDoc(collection(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'scores'), scoreData);
+                        await loadRecords(); // ランキング再取得
+                    })();
 
+                    await Promise.race([savePromise, timeoutPromise]);
                 } catch (e) {
-                    console.error("Save Error", e);
+                    console.error("Save/Load Error or Timeout:", e);
+                    // エラーやタイムアウトでも先へ進む
                 }
             }
 
@@ -386,7 +387,6 @@
             changeScreen('result');
         }
 
-        // --- 4. 結果画面 ---
         function renderResult() {
             const { timeTaken, isFullCombo, isNewRecord } = state.lastResult;
             const timeSec = (timeTaken / 1000).toFixed(1);
@@ -439,12 +439,21 @@
             };
             document.getElementById('homeBtn').onclick = () => {
                 stopConfetti();
-                changeScreen('home');
+                changeScreen('processing');
+                loadRecordsWithTimeout().then(() => changeScreen('home'));
             };
         }
 
-        // --- データ取得ロジック ---
-        // 複雑なクエリ（orderBy, whereの複合）を避けるため、クライアントサイドでフィルタリングします
+        // ラッパー関数：ロード処理にもタイムアウトを付ける
+        async function loadRecordsWithTimeout() {
+            try {
+                const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 3000));
+                await Promise.race([loadRecords(), timeoutPromise]);
+            } catch (e) {
+                console.error("Load Timeout:", e);
+            }
+        }
+
         async function loadRecords() {
             if (!db) return;
 
@@ -452,33 +461,22 @@
             const scoresRef = collection(db, 'artifacts', firebaseConfig.appId, 'public', 'data', 'scores');
             
             try {
-                // シンプルに全データを取得 (本番アプリではデータ量に注意が必要ですが、学習用アプリの規模なら許容範囲)
-                // ※本来は composite index を作って query(scoresRef, where('dateString', '==', todayStr)) すべきですが
-                // index作成の手間を省くため全件取得してJSでフィルタします。
                 const snapshot = await getDocs(scoresRef);
                 const allScores = [];
-                
-                snapshot.forEach(doc => {
-                    allScores.push(doc.data());
-                });
+                snapshot.forEach(doc => allScores.push(doc.data()));
 
-                // 1. 今日のデータのみ抽出
-                const todaysData = allScores.filter(d => d.dateString === todayStr && d.score === 5); // 5問正解のみ
-
-                // 2. 自己ベスト算出
+                const todaysData = allScores.filter(d => d.dateString === todayStr && d.score === 5);
                 const myRecords = allScores.filter(d => d.uid === currentUser.uid && d.score === 5);
+                
                 if (myRecords.length > 0) {
-                    // 時間が短い順
                     myRecords.sort((a, b) => a.timeTaken - b.timeTaken);
                     state.personalBest = { time: myRecords[0].timeTaken };
                 } else {
                     state.personalBest = null;
                 }
 
-                // 3. ランキング作成（時間が短い順）
                 todaysData.sort((a, b) => a.timeTaken - b.timeTaken);
                 
-                // 重複ユーザー除去（ユーザーごとのベストのみ残す）
                 const uniqueRanking = [];
                 const seenUsers = new Set();
                 for (const rec of todaysData) {
@@ -488,7 +486,6 @@
                     }
                     if (uniqueRanking.length >= 5) break;
                 }
-                
                 state.dailyHighScores = uniqueRanking;
 
             } catch (e) {
@@ -496,12 +493,10 @@
             }
         }
 
-        // --- 紙吹雪エフェクト (簡易CSS実装) ---
         function startConfetti() {
             confettiDiv.style.display = 'block';
             confettiDiv.innerHTML = '';
             const colors = ['#EF4444', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6'];
-            
             for (let i = 0; i < 50; i++) {
                 const piece = document.createElement('div');
                 piece.className = 'confetti-piece';
@@ -517,7 +512,6 @@
             confettiDiv.style.display = 'none';
             confettiDiv.innerHTML = '';
         }
-
     </script>
 </body>
 </html>
